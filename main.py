@@ -150,5 +150,8 @@ def handle_message(event):
         print(f"!!! LINE返信エラー !!!: {e}", flush=True)
 
 if __name__ == "__main__":
+    # Renderは 'PORT' という環境変数を自動で用意します。
+    # それがない場合は 10000 を使うように設定します。
     port = int(os.environ.get("PORT", 10000))
+    # 0.0.0.0 で待機することで、Renderが外からアクセスできるようになります。
     app.run(host="0.0.0.0", port=port)
