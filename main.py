@@ -14,7 +14,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# --- 1. 環境変数の取得（Renderの設定画面から） ---
+# --- 1. 環境変数の取得 ---
 LINE_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GEMINI_KEY = os.getenv('GEMINI_API_KEY')
@@ -50,7 +50,6 @@ def fetch_all_data():
     print("--- データの同期を開始します ---", flush=True)
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        # RenderのSecret Filesに保存したcredentials.jsonを使用
         creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
         gc = gspread.authorize(creds)
         workbook = gc.open_by_key(SPREADSHEET_ID)
@@ -69,7 +68,7 @@ def fetch_all_data():
         print(f"!!! データ同期エラー !!!: {e}", flush=True)
 
 def create_event_flex(events):
-    """最新イベント10件をカルーセルで表示"""
+    """最新イベントをカルーセルで表示"""
     bubbles = []
     for e in events:
         bubble = {
@@ -92,9 +91,54 @@ def create_event_flex(events):
         bubbles.append(bubble)
     return {"type": "carousel", "contents": bubbles}
 
+def get_ai_response(user_text, knowledge):
+    """Gemini 2.0 Flash + Web検索による回答生成"""
+    # 検索機能を使用するため v1beta エンドポイントを使用
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    
+    system_instruction = (
+        "あなたは那須町のマスコット『きゅーびー』をイメージした観光コンシェルジュです。\n"
+        "【基本ルール】\n"
+        "1. 丁寧で誠実な標準語で回答してください。\n"
+        "2. まずは提供された『那須の知識（スプレッドシート）』を参考にしてください。\n"
+        "3. スプレッドシートにない情報、バスの運行状況、天気、最新の営業状況などはGoogle検索を使用して回答を補完してください。\n"
+        "4. 回答は150文字程度で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
+    )
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": system_instruction}]
+        },
+        "contents": [{
+            "parts": [{"text": f"那須の知識（スプレッドシート）:\n{knowledge}\n\n質問: {user_text}"}]
+        }],
+        "tools": [
+            {
+                "google_search_retrieval": {
+                    "dynamic_retrieval_config": {
+                        "mode": "DYNAMIC",
+                        "dynamic_threshold": 0.3
+                    }
+                }
+            }
+        ]
+    }
+
+    try:
+        res = requests.post(api_url, json=payload, timeout=20)
+        res_json = res.json()
+        if 'candidates' in res_json:
+            return res_json['candidates'][0]['content']['parts'][0]['text']
+        else:
+            print(f"Gemini API Error: {res_json}")
+            return "申し訳ありません。現在情報を確認できませんでした。時間をおいて再度お尋ねください。"
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return "通信エラーが発生しました。那須の自然のなかで少し電波が不安定なようです。"
+
 @app.route("/", methods=['GET', 'HEAD'])
 def index():
-    return "Event Bot: Active (Gemini 2.0 Flash Mode)", 200
+    return "Nasu Concierge Bot: Active (Search Enabled Mode)", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -109,16 +153,16 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    user_text = event.message.text
+    user_text = event.message.text.strip()
     print(f"メッセージ受信: {user_text}", flush=True)
     fetch_all_data()
 
-    # A. AI起動ボタンへの反応
-    if "AIチャットボット起動" in user_text:
-        reply_text = "承知いたしました！AIコンシェルジュがご質問にお答えします。那須の観光情報について、何でも聞いてくださいね。"
+    # 1. AIチャット起動（完全一致）
+    if user_text == "AIチャットボット起動":
+        reply_text = "こんにちは！那須AIコンシェルジュです。那須の観光情報や最新の天気、バスの状況など、何でもお手伝いいたします。何かお困りのことはありますか？"
         messages = [TextMessage(text=reply_text)]
 
-    # B. イベント表示（キーワード判定）
+    # 2. 最新イベント（キーワード判定）
     elif any(k in user_text for k in ["最新", "イベント"]):
         if not cache_data["events"]:
             messages = [TextMessage(text="現在、掲載中のイベント情報はありません。")]
@@ -126,26 +170,9 @@ def handle_message(event):
             flex_content = create_event_flex(cache_data["events"])
             messages = [FlexMessage(alt_text="最新イベント一覧", contents=FlexContainer.from_dict(flex_content))]
 
-    # C. Gemini 2.0 Flash による回答
+    # 3. それ以外（AI回答 + Web検索）
     else:
-        # 最新の安定版 v1 窓口と gemini-2.0-flash モデルを指定
-        api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-        
-        prompt = f"店舗知識:\n{cache_data['knowledge']}\n\n質問: {user_text}\n\n100字以内で親切に答えて。知らないことは「わかりかねます」と伝えて。"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        
-        try:
-            res = requests.post(api_url, json=payload, timeout=10)
-            if res.status_code == 200:
-                reply_text = res.json()['candidates'][0]['content']['parts'][0]['text']
-            else:
-                # 安定版でダメな場合は一時的なエラーメッセージを出す
-                reply_text = "AIの応答に失敗しました。時間をおいて再度お試しください。"
-                print(f"Gemini API Error: {res.text}", flush=True)
-        except Exception as e:
-            reply_text = "接続エラーが発生しました。"
-            print(f"Connection Error: {e}", flush=True)
-        
+        reply_text = get_ai_response(user_text, cache_data["knowledge"])
         messages = [TextMessage(text=reply_text)]
 
     # 返信実行
@@ -156,6 +183,5 @@ def handle_message(event):
         ))
 
 if __name__ == "__main__":
-    # Renderのポート設定
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
