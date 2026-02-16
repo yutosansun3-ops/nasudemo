@@ -54,11 +54,9 @@ def fetch_all_data():
         gc = gspread.authorize(creds)
         workbook = gc.open_by_key(SPREADSHEET_ID)
 
-        # イベント情報
         e_sheet = workbook.worksheet("イベント情報")
         valid_events = [e for e in e_sheet.get_all_records() if e.get("タイトル")]
         
-        # QA知識
         qa_sheet = workbook.worksheet("QA")
         knowledge = "\n".join([",".join(map(str, row)) for row in qa_sheet.get_all_values()])
 
@@ -92,80 +90,65 @@ def create_event_flex(events):
     return {"type": "carousel", "contents": bubbles}
 
 def get_ai_response(user_text, knowledge):
-    """Gemini 2.0 Flash + Web検索による回答生成 (修正版)"""
+    """Gemini 2.0 Flash + Web検索による回答生成"""
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
     system_instruction = (
         "あなたは那須町のマスコット『きゅーびー』をイメージした観光コンシェルジュです。\n"
-        "【基本ルール】\n"
-        "1. 丁寧で誠実な標準語で回答してください。\n"
-        "2. まずは提供された『那須の知識（スプレッドシート）』を参考にしてください。\n"
-        "3. スプレッドシートにない情報、バスの運行状況、天気、最新の営業状況などはGoogle検索を使用して回答を補完してください。\n"
-        "4. 回答は150文字程度で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
+        "丁寧な標準語で、提供されたスプレッドシート情報、またはWeb検索を補完して回答してください。"
     )
 
     payload = {
-        "system_instruction": {
-            "parts": [{"text": system_instruction}]
-        },
-        "contents": [{
-            "parts": [{"text": f"那須の知識（スプレッドシート）:\n{knowledge}\n\n質問: {user_text}"}]
-        }],
-        "tools": [
-            {
-                "google_search_retrieval": {
-                    "dynamic_retrieval_config": {
-                        "mode": "MODE_DYNAMIC",  # ここを MODE_DYNAMIC に修正
-                        "dynamic_threshold": 0.3
-                    }
-                }
-            }
-        ]
+        "system_instruction": {"parts": [{"text": system_instruction}]},
+        "contents": [{"parts": [{"text": f"那須の知識:\n{knowledge}\n\n質問: {user_text}"}]}],
+        "tools": [{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "MODE_DYNAMIC", "dynamic_threshold": 0.3}}}]
     }
 
     try:
         res = requests.post(api_url, json=payload, timeout=20)
         res_json = res.json()
-        
-        # エラーが出た場合にログに出力する
-        if 'error' in res_json:
-            print(f"API Error Detail: {res_json['error']}")
-            return "申し訳ありません。現在システムが少し機嫌を損ねているようです。時間をおいて再度お尋ねください。"
-
-        if 'candidates' in res_json:
-            return res_json['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return "情報を確認できませんでした。別の言い方で聞いてみてください。"
-            
+        return res_json['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
-        print(f"Connection Error: {e}")
-        return "通信エラーが発生しました。那須の山奥で少し電波が届きにくいようです。"
+        print(f"AI Error: {e}")
+        return "現在情報を確認できませんでした。時間をおいて再度お尋ねください。"
+
+# --- ここからが足りなかった「窓口」の設定です ---
+
+@app.route("/", methods=['GET', 'HEAD'])
+def index():
+    """ブラウザでアクセスした時に見える確認用ページ"""
+    return "Nasu Concierge Bot: Active (Search Enabled)", 200
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    """LINEからの信号を受け取る窓口"""
+    signature = request.headers.get('X-Line-Signature')
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+        abort(400)
+    return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text.strip()
-    print(f"メッセージ受信: {user_text}", flush=True)
     fetch_all_data()
 
-    # 1. AIチャット起動（完全一致）
     if user_text == "AIチャットボット起動":
-        reply_text = "こんにちは！那須AIコンシェルジュです。那須の観光情報や最新の天気、バスの状況など、何でもお手伝いいたします。何かお困りのことはありますか？"
+        reply_text = "こんにちは！那須AIコンシェルジュです。何かお手伝いしましょうか？"
         messages = [TextMessage(text=reply_text)]
-
-    # 2. 最新イベント（キーワード判定）
     elif any(k in user_text for k in ["最新", "イベント"]):
         if not cache_data["events"]:
             messages = [TextMessage(text="現在、掲載中のイベント情報はありません。")]
         else:
             flex_content = create_event_flex(cache_data["events"])
             messages = [FlexMessage(alt_text="最新イベント一覧", contents=FlexContainer.from_dict(flex_content))]
-
-    # 3. それ以外（AI回答 + Web検索）
     else:
         reply_text = get_ai_response(user_text, cache_data["knowledge"])
         messages = [TextMessage(text=reply_text)]
 
-    # 返信実行
     with ApiClient(configuration) as api_client:
         MessagingApi(api_client).reply_message(ReplyMessageRequest(
             reply_token=event.reply_token, 
