@@ -101,53 +101,35 @@ def callback():
         abort(400)
     return 'OK'
 
+# main.py の handle_message 関数部分を修正
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_text = event.message.text
-    print(f"--- メッセージ受信: {user_text} ---", flush=True)
-    
     fetch_all_data()
 
-    # 1. イベント表示
-    if any(k in user_text for k in ["limited", "イベント", "最新"]):
-        print("-> イベント表示処理を開始", flush=True)
-        if not cache_data["events"]:
-            reply_messages = [TextMessage(text="現在、イベント情報はありません。")]
-        else:
-            flex_content = create_event_flex(cache_data["events"])
-            reply_messages = [FlexMessage(alt_text="最新イベント一覧", contents=FlexContainer.from_dict(flex_content))]
-    
-    # 2. AI回答
-    else:
-        print("-> AI回答処理を開始", flush=True)
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-        prompt = f"店舗知識:\n{cache_data['knowledge']}\n\n質問: {user_text}\n\n100字以内で答えて。知らないことは「わかりかねます」と伝えて。"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        
-        try:
-            res = requests.post(api_url, json=payload, timeout=10)
-            print(f"Gemini Status: {res.status_code}", flush=True)
-            if res.status_code == 200:
-                reply_text = res.json()['candidates'][0]['content']['parts'][0]['text']
-            else:
-                reply_text = f"AIが一時的に混み合っています。(Code:{res.status_code})"
-                print(f"Gemini Error Body: {res.text}", flush=True)
-        except Exception as e:
-            reply_text = "AIとの通信に失敗しました。"
-            print(f"Gemini Exception: {e}", flush=True)
-        
-        reply_messages = [TextMessage(text=reply_text)]
-
-    # LINEへの返信実行
-    try:
+    # 先にAI起動の判定を行う（最優先）
+    if "AIチャットボット起動" in user_text:
+        reply_text = "承知いたしました。AIコンシェルジュがご質問にお答えします。何でも聞いてくださいね！"
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).reply_message(ReplyMessageRequest(
-                reply_token=event.reply_token, 
-                messages=reply_messages
-            ))
-        print("--- LINEへの返信成功 ---", flush=True)
-    except Exception as e:
-        print(f"!!! LINE返信エラー !!!: {e}", flush=True)
+                reply_token=event.reply_token, messages=[TextMessage(text=reply_text)]))
+        return
+
+    # 次にイベント表示の判定
+    if any(k in user_text for k in ["イベント", "最新"]):
+        if not cache_data["events"]:
+            reply = [TextMessage(text="現在イベントはありません。")]
+        else:
+            flex = create_event_flex(cache_data["events"])
+            reply = [FlexMessage(alt_text="最新イベント", contents=FlexContainer.from_dict(flex))]
+        
+        with ApiClient(configuration) as api_client:
+            MessagingApi(api_client).reply_message(ReplyMessageRequest(
+                reply_token=event.reply_token, messages=reply))
+        return
+
+    # それ以外は通常のAI回答
+    # (Geminiへのリクエスト処理...前回と同じ)
 
 if __name__ == "__main__":
     # Renderは 'PORT' という環境変数を自動で用意します。
