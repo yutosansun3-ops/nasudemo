@@ -92,8 +92,7 @@ def create_event_flex(events):
     return {"type": "carousel", "contents": bubbles}
 
 def get_ai_response(user_text, knowledge):
-    """Gemini 2.0 Flash + Web検索による回答生成"""
-    # 検索機能を使用するため v1beta エンドポイントを使用
+    """Gemini 2.0 Flash + Web検索による回答生成 (修正版)"""
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
     system_instruction = (
@@ -116,7 +115,7 @@ def get_ai_response(user_text, knowledge):
             {
                 "google_search_retrieval": {
                     "dynamic_retrieval_config": {
-                        "mode": "DYNAMIC",
+                        "mode": "MODE_DYNAMIC",  # ここを MODE_DYNAMIC に修正
                         "dynamic_threshold": 0.3
                     }
                 }
@@ -127,29 +126,20 @@ def get_ai_response(user_text, knowledge):
     try:
         res = requests.post(api_url, json=payload, timeout=20)
         res_json = res.json()
+        
+        # エラーが出た場合にログに出力する
+        if 'error' in res_json:
+            print(f"API Error Detail: {res_json['error']}")
+            return "申し訳ありません。現在システムが少し機嫌を損ねているようです。時間をおいて再度お尋ねください。"
+
         if 'candidates' in res_json:
             return res_json['candidates'][0]['content']['parts'][0]['text']
         else:
-            print(f"Gemini API Error: {res_json}")
-            return "申し訳ありません。現在情報を確認できませんでした。時間をおいて再度お尋ねください。"
+            return "情報を確認できませんでした。別の言い方で聞いてみてください。"
+            
     except Exception as e:
         print(f"Connection Error: {e}")
-        return "通信エラーが発生しました。那須の自然のなかで少し電波が不安定なようです。"
-
-@app.route("/", methods=['GET', 'HEAD'])
-def index():
-    return "Nasu Concierge Bot: Active (Search Enabled Mode)", 200
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        print(f"!!! Webhook Error !!!: {e}", flush=True)
-        abort(400)
-    return 'OK'
+        return "通信エラーが発生しました。那須の山奥で少し電波が届きにくいようです。"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
