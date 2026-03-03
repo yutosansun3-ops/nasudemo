@@ -23,12 +23,12 @@ SPREADSHEET_ID = os.getenv('SPREADSHEET_KEY')
 handler = WebhookHandler(LINE_SECRET)
 configuration = Configuration(access_token=LINE_ACCESS_TOKEN)
 
-# キャッシュ管理
+# キャッシュ管理（API負荷軽減のため）
 cache_data = {"events": [], "knowledge": "", "last_updated": 0}
 CACHE_LIMIT = 600 
 
 def convert_to_direct_url(raw_url):
-    """Googleドライブ等のURLを直リンクに変換"""
+    """Googleドライブ等のURLを画像直リンクに変換"""
     if not raw_url or not str(raw_url).startswith('http'):
         return "https://via.placeholder.com/1000x650.png?text=No+Image"
     file_id = ""
@@ -51,13 +51,11 @@ def fetch_all_data():
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         
-        # 【重要】ファイルの場所を自動判定（フォルダ名が変わっても大丈夫なように）
+        # 実行ファイルの場所を基準にcredentials.jsonを探す
         base_path = os.path.dirname(__file__)
         creds_path = os.path.join(base_path, 'credentials.json')
         
         if not os.path.exists(creds_path):
-            print(f"!!! エラー: {creds_path} が見つかりません !!!", flush=True)
-            # ルート階層も探してみる（バックアップ策）
             creds_path = 'credentials.json'
 
         creds = Credentials.from_service_account_file(creds_path, scopes=scope)
@@ -75,7 +73,7 @@ def fetch_all_data():
         cache_data.update({"events": valid_events[-10:], "knowledge": knowledge, "last_updated": now})
         print("--- データの同期に成功しました ---", flush=True)
     except Exception as e:
-        print(f"!!! データ同期エラーの詳細 !!!: {e}", flush=True)
+        print(f"!!! データ同期エラー !!!: {e}", flush=True)
 
 def create_event_flex(events):
     """最新イベントをカルーセルで表示"""
@@ -102,15 +100,16 @@ def create_event_flex(events):
     return {"type": "carousel", "contents": bubbles}
 
 def get_ai_response(user_text, knowledge):
-    """Gemini 2.0 Flash + Web検索（エラー診断付き）"""
+    """Gemini 2.0 Flash + Web検索（定型文廃止版）"""
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
+    # 柔和なトーンと自然な挨拶の指示
     system_instruction = (
         "あなたは那須町の観光コンシェルジュです。柔和で親しみやすく、丁寧な敬語で案内してください。\n"
         "【回答ルール】\n"
         "1. 提供された『那須の知識（スプレッドシート）』の内容を最優先で案内してください。\n"
-        "2. スプレッドシートにない情報や、最新の天気、交通状況、現在の営業時間についてはWEB検索を活用して補足してください。\n"
-        "3. 回答は150文字以内で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
+        "2. 最新の天気、交通状況、現在の営業時間についてはWEB検索を活用して補足してください。\n"
+        "3. 回答は150文字以内で簡潔にまとめ、文脈に合わせて「お気をつけて」や「楽しみですね」といった自然な一言を添えて締めくくってください。"
     )
 
     payload = {
@@ -120,29 +119,22 @@ def get_ai_response(user_text, knowledge):
     }
 
     try:
-        print(f"--- Geminiに問い合わせ開始（質問: {user_text}） ---", flush=True)
         res = requests.post(api_url, json=payload, timeout=25)
         res_json = res.json()
-        
-        if 'error' in res_json:
-            print(f"!!! Gemini APIエラー !!!: {res_json['error']}", flush=True)
-            return "申し訳ございません。現在情報を確認しづらい状況です。少し時間を置いてお尋ねください。"
-
         if 'candidates' in res_json:
             return res_json['candidates'][0]['content']['parts'][0]['text']
         else:
-            print(f"!!! Gemini応答に中身がありません !!!: {res_json}", flush=True)
-            return "適切な回答を見つけられませんでした。別の言葉でお尋ねいただけますか？"
-            
+            print(f"Gemini API Response Error: {res_json}", flush=True)
+            return "申し訳ございません。適切な情報が見つかりませんでした。別の言葉でお尋ねいただけますか？"
     except Exception as e:
-        print(f"!!! AI通信エラーの詳細 !!!: {e}", flush=True)
-        return "通信エラーが発生しました。那須の山奥で少し電波が届きにくいようです。"
+        print(f"AI通信エラー: {e}", flush=True)
+        return "申し訳ございません。通信状況によりお答えできませんでした。少し時間を置いて再度お尋ねください。"
 
 # --- Flask ルート ---
 
 @app.route("/", methods=['GET', 'HEAD'])
 def index():
-    return "Nasu Concierge Bot: Active (Hybrid Search Mode)", 200
+    return "Nasu Concierge Bot: Active (Gentle Hybrid Mode)", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -151,7 +143,7 @@ def callback():
     try:
         handler.handle(body, signature)
     except Exception as e:
-        print(f"!!! Webhookハンドラエラー !!!: {e}", flush=True)
+        print(f"Webhook Error: {e}")
         abort(400)
     return 'OK'
 
