@@ -28,7 +28,7 @@ cache_data = {"events": [], "knowledge": "", "last_updated": 0}
 CACHE_LIMIT = 600 
 
 def convert_to_direct_url(raw_url):
-    """Googleドライブ等のURLを直リンクに変換"""
+    """Googleドライブ等のURLを画像直リンクに変換"""
     if not raw_url or not str(raw_url).startswith('http'):
         return "https://via.placeholder.com/1000x650.png?text=No+Image"
     file_id = ""
@@ -41,16 +41,14 @@ def convert_to_direct_url(raw_url):
     return f"https://drive.google.com/uc?export=view&id={file_id}" if file_id else raw_url
 
 def fetch_all_data():
-    """スプレッドシートから知識とイベント情報を取得"""
+    """スプレッドシートからQA知識とイベント情報を取得"""
     global cache_data
     now = time.time()
     if cache_data["last_updated"] > 0 and (now - cache_data["last_updated"] < CACHE_LIMIT):
         return
     
-    print("--- データの同期を開始します ---", flush=True)
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        # RenderのSecret Filesに保存したcredentials.jsonを読み込み
         creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
         gc = gspread.authorize(creds)
         workbook = gc.open_by_key(SPREADSHEET_ID)
@@ -59,17 +57,16 @@ def fetch_all_data():
         e_sheet = workbook.worksheet("イベント情報")
         valid_events = [e for e in e_sheet.get_all_records() if e.get("タイトル")]
         
-        # QA知識（AIのカンペ）
+        # QA知識
         qa_sheet = workbook.worksheet("QA")
         knowledge = "\n".join([": ".join(map(str, row)) for row in qa_sheet.get_all_values()])
 
         cache_data.update({"events": valid_events[-10:], "knowledge": knowledge, "last_updated": now})
-        print("--- データの同期に成功しました ---", flush=True)
     except Exception as e:
-        print(f"!!! データ同期エラー !!!: {e}", flush=True)
+        print(f"Sync Error: {e}", flush=True)
 
 def create_event_flex(events):
-    """最新イベントをカルーセルで表示（Flex Message）"""
+    """イベント情報をFlex Messageに変換"""
     bubbles = []
     for e in events:
         bubble = {
@@ -93,24 +90,22 @@ def create_event_flex(events):
     return {"type": "carousel", "contents": bubbles}
 
 def get_ai_response(user_text, knowledge):
-    """Gemini 2.0 Flash + Web検索（スプレッドシート補完モード）"""
+    """Gemini 2.0 Flash + Web検索（柔和な案内モード）"""
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
-    # AIへの「補完」指示
     system_instruction = (
-        "あなたは那須町のマスコット『きゅーびー』をイメージした観光コンシェルジュです。\n"
+        "あなたは那須町の観光コンシェルジュです。柔和で親しみやすく、丁寧な敬語で案内してください。\n"
         "【回答ルール】\n"
-        "1. 提供された『那須の知識（スプレッドシート）』を第一の正解として扱ってください。\n"
-        "2. スプレッドシートにある情報に対して、WEB検索を使って『現在の混雑状況』『今日の営業時間』『最新の口コミ』などの動的な情報を付け加えて補完してください。\n"
-        "3. スプレッドシートに全くない情報は、WEB検索で得た信頼できる情報に基づいて回答してください。\n"
-        "4. 回答は150文字以内で、丁寧な標準語でまとめてください。\n"
-        "5. 最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
+        "1. 提供された『那須の知識（スプレッドシート）』の内容を最優先で案内してください。\n"
+        "2. スプレッドシートにない情報や、最新の天気、交通状況、現在の営業時間についてはWEB検索を活用して補足してください。\n"
+        "3. 専門用語を避け、観光客が理解しやすい言葉を選んでください。\n"
+        "4. 回答は150文字以内で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
     )
 
     payload = {
         "system_instruction": {"parts": [{"text": system_instruction}]},
         "contents": [{"parts": [{"text": f"那須の知識:\n{knowledge}\n\n質問: {user_text}"}]}],
-        "tools": [{"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "MODE_DYNAMIC", "dynamic_threshold": 0.3}}}]
+        "tools": [{"google_search": {}}]
     }
 
     try:
@@ -119,17 +114,16 @@ def get_ai_response(user_text, knowledge):
         if 'candidates' in res_json:
             return res_json['candidates'][0]['content']['parts'][0]['text']
         else:
-            print(f"API Error: {res_json}", flush=True)
-            return "情報を確認中です。もう一度、別の言い方で聞いてみてください。"
+            return "お調べしましたが、適切な情報が見つかりませんでした。別の言葉で聞いていただけますか？"
     except Exception as e:
-        print(f"AI通信エラー: {e}")
-        return "通信エラーが発生しました。那須の山奥で少し電波が届きにくいようです。"
+        print(f"AI Error: {e}")
+        return "申し訳ございません。通信状況によりお答えできませんでした。少し時間を置いて再度お尋ねください。"
 
-# --- Flask ルート設定 ---
+# --- Flask ルート ---
 
 @app.route("/", methods=['GET', 'HEAD'])
 def index():
-    return "Nasu Concierge Bot: Active (Hybrid Mode)", 200
+    return "Nasu Concierge Bot: Active (Gentle Mode)", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -138,7 +132,6 @@ def callback():
     try:
         handler.handle(body, signature)
     except Exception as e:
-        print(f"Webhook Error: {e}")
         abort(400)
     return 'OK'
 
@@ -148,16 +141,15 @@ def handle_message(event):
     fetch_all_data()
 
     if user_text == "AIチャットボット起動":
-        reply_text = "こんにちは！那須AIコンシェルジュです。那須の観光情報や最新の状況など、何でもお手伝いいたします！"
+        reply_text = "こんにちは。那須観光AIコンシェルジュです。那須の観光スポットや今日の様子など、何でもお気軽にお尋ねください。"
         messages = [TextMessage(text=reply_text)]
-    elif any(k in user_text for k in ["最新", "イベント"]):
+    elif any(k in user_text for k in ["イベント", "最新"]):
         if not cache_data["events"]:
-            messages = [TextMessage(text="現在、掲載中のイベント情報はありません。")]
+            messages = [TextMessage(text="申し訳ございません。現在ご案内できるイベント情報はございません。")]
         else:
             flex_content = create_event_flex(cache_data["events"])
             messages = [FlexMessage(alt_text="最新イベント一覧", contents=FlexContainer.from_dict(flex_content))]
     else:
-        # AI回答（スプレッドシート + WEB検索）
         reply_text = get_ai_response(user_text, cache_data["knowledge"])
         messages = [TextMessage(text=reply_text)]
 
