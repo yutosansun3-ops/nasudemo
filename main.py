@@ -28,7 +28,7 @@ cache_data = {"events": [], "knowledge": "", "last_updated": 0}
 CACHE_LIMIT = 600 
 
 def convert_to_direct_url(raw_url):
-    """Googleドライブ等のURLを画像直リンクに変換"""
+    """Googleドライブ等のURLを直リンクに変換"""
     if not raw_url or not str(raw_url).startswith('http'):
         return "https://via.placeholder.com/1000x650.png?text=No+Image"
     file_id = ""
@@ -41,15 +41,26 @@ def convert_to_direct_url(raw_url):
     return f"https://drive.google.com/uc?export=view&id={file_id}" if file_id else raw_url
 
 def fetch_all_data():
-    """スプレッドシートからQA知識とイベント情報を取得"""
+    """スプレッドシートから知識を取得（パス解決を強化）"""
     global cache_data
     now = time.time()
     if cache_data["last_updated"] > 0 and (now - cache_data["last_updated"] < CACHE_LIMIT):
         return
     
+    print("--- データの同期を開始します ---", flush=True)
     try:
         scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
+        
+        # 【重要】ファイルの場所を自動判定（フォルダ名が変わっても大丈夫なように）
+        base_path = os.path.dirname(__file__)
+        creds_path = os.path.join(base_path, 'credentials.json')
+        
+        if not os.path.exists(creds_path):
+            print(f"!!! エラー: {creds_path} が見つかりません !!!", flush=True)
+            # ルート階層も探してみる（バックアップ策）
+            creds_path = 'credentials.json'
+
+        creds = Credentials.from_service_account_file(creds_path, scopes=scope)
         gc = gspread.authorize(creds)
         workbook = gc.open_by_key(SPREADSHEET_ID)
 
@@ -62,11 +73,12 @@ def fetch_all_data():
         knowledge = "\n".join([": ".join(map(str, row)) for row in qa_sheet.get_all_values()])
 
         cache_data.update({"events": valid_events[-10:], "knowledge": knowledge, "last_updated": now})
+        print("--- データの同期に成功しました ---", flush=True)
     except Exception as e:
-        print(f"Sync Error: {e}", flush=True)
+        print(f"!!! データ同期エラーの詳細 !!!: {e}", flush=True)
 
 def create_event_flex(events):
-    """イベント情報をFlex Messageに変換"""
+    """最新イベントをカルーセルで表示"""
     bubbles = []
     for e in events:
         bubble = {
@@ -90,7 +102,7 @@ def create_event_flex(events):
     return {"type": "carousel", "contents": bubbles}
 
 def get_ai_response(user_text, knowledge):
-    """Gemini 2.0 Flash + Web検索（柔和な案内モード）"""
+    """Gemini 2.0 Flash + Web検索（エラー診断付き）"""
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
     system_instruction = (
@@ -98,8 +110,7 @@ def get_ai_response(user_text, knowledge):
         "【回答ルール】\n"
         "1. 提供された『那須の知識（スプレッドシート）』の内容を最優先で案内してください。\n"
         "2. スプレッドシートにない情報や、最新の天気、交通状況、現在の営業時間についてはWEB検索を活用して補足してください。\n"
-        "3. 専門用語を避け、観光客が理解しやすい言葉を選んでください。\n"
-        "4. 回答は150文字以内で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
+        "3. 回答は150文字以内で簡潔にまとめ、最後に『那須での時間が素晴らしいものになりますように。』と添えてください。"
     )
 
     payload = {
@@ -109,21 +120,29 @@ def get_ai_response(user_text, knowledge):
     }
 
     try:
+        print(f"--- Geminiに問い合わせ開始（質問: {user_text}） ---", flush=True)
         res = requests.post(api_url, json=payload, timeout=25)
         res_json = res.json()
+        
+        if 'error' in res_json:
+            print(f"!!! Gemini APIエラー !!!: {res_json['error']}", flush=True)
+            return "申し訳ございません。現在情報を確認しづらい状況です。少し時間を置いてお尋ねください。"
+
         if 'candidates' in res_json:
             return res_json['candidates'][0]['content']['parts'][0]['text']
         else:
-            return "お調べしましたが、適切な情報が見つかりませんでした。別の言葉で聞いていただけますか？"
+            print(f"!!! Gemini応答に中身がありません !!!: {res_json}", flush=True)
+            return "適切な回答を見つけられませんでした。別の言葉でお尋ねいただけますか？"
+            
     except Exception as e:
-        print(f"AI Error: {e}")
-        return "申し訳ございません。通信状況によりお答えできませんでした。少し時間を置いて再度お尋ねください。"
+        print(f"!!! AI通信エラーの詳細 !!!: {e}", flush=True)
+        return "通信エラーが発生しました。那須の山奥で少し電波が届きにくいようです。"
 
 # --- Flask ルート ---
 
 @app.route("/", methods=['GET', 'HEAD'])
 def index():
-    return "Nasu Concierge Bot: Active (Gentle Mode)", 200
+    return "Nasu Concierge Bot: Active (Hybrid Search Mode)", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -132,6 +151,7 @@ def callback():
     try:
         handler.handle(body, signature)
     except Exception as e:
+        print(f"!!! Webhookハンドラエラー !!!: {e}", flush=True)
         abort(400)
     return 'OK'
 
@@ -150,6 +170,7 @@ def handle_message(event):
             flex_content = create_event_flex(cache_data["events"])
             messages = [FlexMessage(alt_text="最新イベント一覧", contents=FlexContainer.from_dict(flex_content))]
     else:
+        # AI回答（スプレッドシート + WEB検索）
         reply_text = get_ai_response(user_text, cache_data["knowledge"])
         messages = [TextMessage(text=reply_text)]
 
